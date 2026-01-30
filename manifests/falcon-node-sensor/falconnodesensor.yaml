@@ -1,0 +1,14 @@
+apiVersion: falcon.crowdstrike.com/v1alpha1
+kind: FalconNodeSensor
+metadata:
+  name: falcon-node-sensor
+  namespace: falcon-system
+spec:
+  falcon:
+    # CID will be pulled from the secret created by GitLab pipeline
+    cid: falcon-client-credentials
+  node: {}
+  falcon_api:
+    client_id: falcon-client-credentials
+    client_secret: falcon-client-credentials
+    cloud_region: autodiscover
