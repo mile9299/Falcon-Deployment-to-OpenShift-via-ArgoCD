@@ -1,0 +1,218 @@
+# .gitlab-ci.yml
+
+variables:
+  ARGOCD_SERVER: "argocd.example.com"
+  ARGOCD_APP_NAME: "falcon-operator"
+  OPENSHIFT_CLUSTER: "production-cluster"
+  FALCON_NAMESPACE: "falcon-system"
+  ARGOCD_PROJECT: "security"
+
+stages:
+  - validate
+  - prepare
+  - deploy
+  - verify
+
+# Validate manifests and configuration
+validate:manifests:
+  stage: validate
+  image: registry.redhat.io/openshift4/ose-cli:latest
+  script:
+    - echo "Validating Falcon Operator manifests..."
+    - oc apply --dry-run=client -f manifests/
+    - echo "Validation successful"
+  only:
+    - merge_requests
+    - main
+
+# Prepare ArgoCD Application
+prepare:argocd-app:
+  stage: prepare
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - |
+      cat <<EOF > argocd-application.yaml
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: ${ARGOCD_APP_NAME}
+        namespace: argocd
+      spec:
+        project: ${ARGOCD_PROJECT}
+        source:
+          repoURL: ${CI_REPOSITORY_URL}
+          targetRevision: ${CI_COMMIT_BRANCH}
+          path: manifests/falcon-operator
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: ${FALCON_NAMESPACE}
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+          syncOptions:
+            - CreateNamespace=true
+      EOF
+    - cat argocd-application.yaml
+  artifacts:
+    paths:
+      - argocd-application.yaml
+    expire_in: 1 hour
+  only:
+    - main
+
+# Deploy Falcon Operator via ArgoCD
+deploy:falcon-operator:
+  stage: deploy
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - echo "Creating/Updating ArgoCD Application..."
+    - argocd app create -f argocd-application.yaml --upsert
+    - echo "Syncing Falcon Operator..."
+    - argocd app sync ${ARGOCD_APP_NAME} --prune
+    - argocd app wait ${ARGOCD_APP_NAME} --timeout 600
+  dependencies:
+    - prepare:argocd-app
+  only:
+    - main
+
+# Deploy Falcon Node Sensor
+deploy:node-sensor:
+  stage: deploy
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - |
+      cat <<EOF > argocd-node-sensor.yaml
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: falcon-node-sensor
+        namespace: argocd
+      spec:
+        project: ${ARGOCD_PROJECT}
+        source:
+          repoURL: ${CI_REPOSITORY_URL}
+          targetRevision: ${CI_COMMIT_BRANCH}
+          path: manifests/falcon-node-sensor
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: ${FALCON_NAMESPACE}
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+      EOF
+    - argocd app create -f argocd-node-sensor.yaml --upsert
+    - argocd app sync falcon-node-sensor --prune
+    - argocd app wait falcon-node-sensor --timeout 600
+  needs:
+    - deploy:falcon-operator
+  only:
+    - main
+
+# Deploy KAC (Kubernetes Admission Controller)
+deploy:kac:
+  stage: deploy
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - |
+      cat <<EOF > argocd-kac.yaml
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: falcon-kac
+        namespace: argocd
+      spec:
+        project: ${ARGOCD_PROJECT}
+        source:
+          repoURL: ${CI_REPOSITORY_URL}
+          targetRevision: ${CI_COMMIT_BRANCH}
+          path: manifests/falcon-kac
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: ${FALCON_NAMESPACE}
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+      EOF
+    - argocd app create -f argocd-kac.yaml --upsert
+    - argocd app sync falcon-kac --prune
+    - argocd app wait falcon-kac --timeout 600
+  needs:
+    - deploy:falcon-operator
+  only:
+    - main
+
+# Deploy IAR (Image Assessment at Runtime)
+deploy:iar:
+  stage: deploy
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - |
+      cat <<EOF > argocd-iar.yaml
+      apiVersion: argoproj.io/v1alpha1
+      kind: Application
+      metadata:
+        name: falcon-iar
+        namespace: argocd
+      spec:
+        project: ${ARGOCD_PROJECT}
+        source:
+          repoURL: ${CI_REPOSITORY_URL}
+          targetRevision: ${CI_COMMIT_BRANCH}
+          path: manifests/falcon-iar
+        destination:
+          server: https://kubernetes.default.svc
+          namespace: ${FALCON_NAMESPACE}
+        syncPolicy:
+          automated:
+            prune: true
+            selfHeal: true
+      EOF
+    - argocd app create -f argocd-iar.yaml --upsert
+    - argocd app sync falcon-iar --prune
+    - argocd app wait falcon-iar --timeout 600
+  needs:
+    - deploy:falcon-operator
+  only:
+    - main
+
+# Verify deployment
+verify:deployment:
+  stage: verify
+  image: registry.redhat.io/openshift4/ose-cli:latest
+  before_script:
+    - oc login --token=$OPENSHIFT_TOKEN --server=$OPENSHIFT_SERVER --insecure-skip-tls-verify
+  script:
+    - echo "Verifying Falcon Operator deployment..."
+    - oc get pods -n ${FALCON_NAMESPACE}
+    - oc get falconnodesensor -n ${FALCON_NAMESPACE}
+    - oc get falconadmission -n ${FALCON_NAMESPACE}
+    - oc get falconimageanalyzer -n ${FALCON_NAMESPACE}
+    - |
+      echo "Checking Node Sensor DaemonSet..."
+      oc wait --for=condition=ready pod -l app=falcon-node-sensor -n ${FALCON_NAMESPACE} --timeout=300s
+    - |
+      echo "Checking KAC Deployment..."
+      oc wait --for=condition=available deployment -l app=falcon-kac -n ${FALCON_NAMESPACE} --timeout=300s
+    - |
+      echo "Checking IAR Deployment..."
+      oc wait --for=condition=available deployment -l app=falcon-iar -n ${FALCON_NAMESPACE} --timeout=300s
+    - echo "All Falcon components deployed successfully!"
+  needs:
+    - deploy:node-sensor
+    - deploy:kac
+    - deploy:iar
+  only:
+    - main
