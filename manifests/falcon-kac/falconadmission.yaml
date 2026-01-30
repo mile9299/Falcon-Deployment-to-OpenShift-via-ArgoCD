@@ -1,0 +1,16 @@
+apiVersion: falcon.crowdstrike.com/v1alpha1
+kind: FalconAdmission
+metadata:
+  name: falcon-kac
+  namespace: falcon-system
+spec:
+  falcon_api:
+    client_id: falcon-client-credentials
+    client_secret: falcon-client-credentials
+    cloud_region: autodiscover
+  registry:
+    type: crowdstrike
+  admissionConfig:
+    failurePolicy: Ignore
+    port: 443
+    
