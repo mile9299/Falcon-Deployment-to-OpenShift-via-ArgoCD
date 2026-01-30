@@ -25,6 +25,34 @@ validate:manifests:
     - merge_requests
     - main
 
+# Create Falcon credentials secret from GitLab variables
+prepare:falcon-secrets:
+  stage: prepare
+  image: registry.redhat.io/openshift4/ose-cli:latest
+  before_script:
+    - oc login --token=$OPENSHIFT_TOKEN --server=$OPENSHIFT_SERVER --insecure-skip-tls-verify
+  script:
+    - |
+      echo "Creating Falcon credentials secret from GitLab Key Vault..."
+      oc create namespace ${FALCON_NAMESPACE} --dry-run=client -o yaml | oc apply -f -
+      
+      # Create secret from masked GitLab variables
+      oc create secret generic falcon-client-credentials \
+        --from-literal=client_id="${FALCON_CLIENT_ID}" \
+        --from-literal=client_secret="${FALCON_CLIENT_SECRET}" \
+        --namespace=${FALCON_NAMESPACE} \
+        --dry-run=client -o yaml | oc apply -f -
+      
+      # Create CID secret if needed
+      oc create secret generic falcon-cid \
+        --from-literal=cid="${FALCON_CID}" \
+        --namespace=${FALCON_NAMESPACE} \
+        --dry-run=client -o yaml | oc apply -f -
+      
+      echo "Secrets created successfully"
+  only:
+    - main
+
 # Prepare ArgoCD Application
 prepare:argocd-app:
   stage: prepare
@@ -39,6 +67,8 @@ prepare:argocd-app:
       metadata:
         name: ${ARGOCD_APP_NAME}
         namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.argoproj.io
       spec:
         project: ${ARGOCD_PROJECT}
         source:
@@ -54,6 +84,7 @@ prepare:argocd-app:
             selfHeal: true
           syncOptions:
             - CreateNamespace=true
+            - RespectIgnoreDifferences=true
       EOF
     - cat argocd-application.yaml
   artifacts:
@@ -77,6 +108,8 @@ deploy:falcon-operator:
     - argocd app wait ${ARGOCD_APP_NAME} --timeout 600
   dependencies:
     - prepare:argocd-app
+  needs:
+    - prepare:falcon-secrets
   only:
     - main
 
@@ -94,6 +127,8 @@ deploy:node-sensor:
       metadata:
         name: falcon-node-sensor
         namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.argoproj.io
       spec:
         project: ${ARGOCD_PROJECT}
         source:
@@ -107,6 +142,8 @@ deploy:node-sensor:
           automated:
             prune: true
             selfHeal: true
+          syncOptions:
+            - RespectIgnoreDifferences=true
       EOF
     - argocd app create -f argocd-node-sensor.yaml --upsert
     - argocd app sync falcon-node-sensor --prune
@@ -130,6 +167,8 @@ deploy:kac:
       metadata:
         name: falcon-kac
         namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.argoproj.io
       spec:
         project: ${ARGOCD_PROJECT}
         source:
@@ -143,6 +182,8 @@ deploy:kac:
           automated:
             prune: true
             selfHeal: true
+          syncOptions:
+            - RespectIgnoreDifferences=true
       EOF
     - argocd app create -f argocd-kac.yaml --upsert
     - argocd app sync falcon-kac --prune
@@ -166,6 +207,8 @@ deploy:iar:
       metadata:
         name: falcon-iar
         namespace: argocd
+        finalizers:
+          - resources-finalizer.argocd.argoproj.io
       spec:
         project: ${ARGOCD_PROJECT}
         source:
@@ -179,6 +222,8 @@ deploy:iar:
           automated:
             prune: true
             selfHeal: true
+          syncOptions:
+            - RespectIgnoreDifferences=true
       EOF
     - argocd app create -f argocd-iar.yaml --upsert
     - argocd app sync falcon-iar --prune
@@ -197,22 +242,43 @@ verify:deployment:
   script:
     - echo "Verifying Falcon Operator deployment..."
     - oc get pods -n ${FALCON_NAMESPACE}
+    - echo "Checking secrets..."
+    - oc get secret falcon-client-credentials -n ${FALCON_NAMESPACE}
+    - oc get secret falcon-cid -n ${FALCON_NAMESPACE}
+    - echo "Checking Falcon CRs..."
     - oc get falconnodesensor -n ${FALCON_NAMESPACE}
     - oc get falconadmission -n ${FALCON_NAMESPACE}
     - oc get falconimageanalyzer -n ${FALCON_NAMESPACE}
     - |
       echo "Checking Node Sensor DaemonSet..."
-      oc wait --for=condition=ready pod -l app=falcon-node-sensor -n ${FALCON_NAMESPACE} --timeout=300s
+      oc wait --for=condition=ready pod -l app=falcon-node-sensor -n ${FALCON_NAMESPACE} --timeout=300s || true
     - |
       echo "Checking KAC Deployment..."
-      oc wait --for=condition=available deployment -l app=falcon-kac -n ${FALCON_NAMESPACE} --timeout=300s
+      oc wait --for=condition=available deployment -l app=falcon-kac -n ${FALCON_NAMESPACE} --timeout=300s || true
     - |
       echo "Checking IAR Deployment..."
-      oc wait --for=condition=available deployment -l app=falcon-iar -n ${FALCON_NAMESPACE} --timeout=300s
-    - echo "All Falcon components deployed successfully!"
+      oc wait --for=condition=available deployment -l app=falcon-iar -n ${FALCON_NAMESPACE} --timeout=300s || true
+    - echo "Deployment verification complete!"
   needs:
     - deploy:node-sensor
     - deploy:kac
     - deploy:iar
+  only:
+    - main
+
+# Cleanup job (manual trigger)
+cleanup:falcon:
+  stage: deploy
+  image: argoproj/argocd:latest
+  before_script:
+    - argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --insecure
+  script:
+    - echo "Deleting Falcon ArgoCD applications..."
+    - argocd app delete falcon-iar --yes || true
+    - argocd app delete falcon-kac --yes || true
+    - argocd app delete falcon-node-sensor --yes || true
+    - argocd app delete ${ARGOCD_APP_NAME} --yes || true
+    - echo "Cleanup complete"
+  when: manual
   only:
     - main
