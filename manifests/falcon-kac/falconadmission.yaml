@@ -13,4 +13,3 @@ spec:
   admissionConfig:
     failurePolicy: Ignore
     port: 443
-    
