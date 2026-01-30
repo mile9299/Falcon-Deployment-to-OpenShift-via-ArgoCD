@@ -6,7 +6,7 @@ metadata:
 spec:
   falcon:
     # CID will be pulled from the secret created by GitLab pipeline
-    cid: falcon-client-credentials
+    cid: ""
   node: {}
   falcon_api:
     client_id: falcon-client-credentials
